@@ -4802,20 +4802,21 @@ function smokeAppServerServerRequestHandler(): void {
 
 async function smokeCommandRunner(): Promise<void> {
   const tempDir = await mkdtemp(join(tmpdir(), 'cx-codex-command-runner-'))
+  const nodeExecutable = process.env.CX_CODEX_NODE_EXECUTABLE?.trim() || process.execPath
   try {
-    await runCommand(process.execPath, ['-e', 'process.exit(0)'], { cwd: tempDir })
+    await runCommand(nodeExecutable, ['-e', 'process.exit(0)'], { cwd: tempDir })
     assert.equal(
-      await runCommandCapture(process.execPath, ['-e', 'console.log(process.cwd())'], { cwd: tempDir }),
+      await runCommandCapture(nodeExecutable, ['-e', 'console.log(process.cwd())'], { cwd: tempDir }),
       tempDir,
     )
     assert.equal(
-      await runCommandWithOutput(process.execPath, ['-e', 'console.log("  output  ")']),
+      await runCommandWithOutput(nodeExecutable, ['-e', 'console.log("  output  ")']),
       'output',
     )
     await assert.rejects(
-      runCommand(process.execPath, ['-e', 'console.error("stderr detail"); console.log("stdout detail"); process.exit(7)']),
+      runCommand(nodeExecutable, ['-e', 'console.error("stderr detail"); console.log("stdout detail"); process.exit(7)']),
       (error) => error instanceof Error
-        && error.message.includes(`Command failed (${process.execPath} -e`)
+        && error.message.includes(`Command failed (${nodeExecutable} -e`)
         && error.message.includes('stderr detail')
         && error.message.includes('stdout detail'),
     )
@@ -5002,19 +5003,27 @@ async function smokeFileUploadRoute(): Promise<void> {
 
 async function smokeSessionAttachmentAccess(): Promise<void> {
   const tempRoot = await mkdtemp(join(tmpdir(), 'cx-codex-session-image-source-'))
+  const attachmentRoot = await mkdtemp(join(tmpdir(), 'cx-codex-codex-attachments-'))
   const uploadRoot = await mkdtemp(join(tmpdir(), 'cx-codex-session-image-cache-'))
   const boundedUploadRoot = await mkdtemp(join(tmpdir(), 'cx-codex-session-image-bounded-cache-'))
   const concurrencyUploadRoot = await mkdtemp(join(tmpdir(), 'cx-codex-session-image-concurrency-cache-'))
   const imagePath = join(tempRoot, 'codex-clipboard-a609cc73-60c9-496b-a884-87addcbc72b3.jpg')
   const prefetchedImagePath = join(tempRoot, 'codex-clipboard-73175ea6-4e8e-400b-a804-f9d3b1359289.jpg')
+  const codexAttachmentPath = join(attachmentRoot, 'codex-clipboard-cfcb2bc6-7192-44f0-9871-7b8bb87aceaf.png')
   const unrelatedPath = join(tempRoot, 'private-note.jpg')
   const imageBytes = Buffer.from('session-image-bytes')
   const prefetchedImageBytes = Buffer.from('prefetched-session-image-bytes')
-  const store = new SessionAttachmentAccessStore({ tempDir: tempRoot, uploadDir: uploadRoot })
+  const codexAttachmentBytes = Buffer.from('codex-attachment-image-bytes')
+  const store = new SessionAttachmentAccessStore({
+    tempDir: tempRoot,
+    attachmentDir: attachmentRoot,
+    uploadDir: uploadRoot,
+  })
 
   try {
     await writeFile(imagePath, imageBytes)
     await writeFile(prefetchedImagePath, prefetchedImageBytes)
+    await writeFile(codexAttachmentPath, codexAttachmentBytes)
     await writeFile(unrelatedPath, Buffer.from('not-authorized'))
     await assert.rejects(
       () => store.resolve(imagePath),
@@ -5047,6 +5056,25 @@ async function smokeSessionAttachmentAccess(): Promise<void> {
     assert.equal(
       (await readFile(await store.resolve(prefetchedImagePath))).toString('utf8'),
       prefetchedImageBytes.toString('utf8'),
+    )
+
+    await assert.rejects(
+      () => store.resolve(codexAttachmentPath),
+      (error: unknown) => error instanceof SessionAttachmentAccessError && error.code === 'not-registered',
+    )
+    assert.deepEqual(store.rememberFromThreadRead({
+      thread: {
+        turns: [{ items: [{ type: 'imageView', path: codexAttachmentPath }] }],
+      },
+    }), [codexAttachmentPath])
+    assert.equal(
+      (await readFile(await store.resolve(codexAttachmentPath))).toString('utf8'),
+      codexAttachmentBytes.toString('utf8'),
+    )
+    await rm(codexAttachmentPath, { force: true })
+    assert.equal(
+      (await readFile(await store.resolve(codexAttachmentPath))).toString('utf8'),
+      codexAttachmentBytes.toString('utf8'),
     )
 
     const boundedPaths = [
@@ -5115,6 +5143,7 @@ async function smokeSessionAttachmentAccess(): Promise<void> {
     )
   } finally {
     await rm(tempRoot, { recursive: true, force: true })
+    await rm(attachmentRoot, { recursive: true, force: true })
     await rm(uploadRoot, { recursive: true, force: true })
     await rm(boundedUploadRoot, { recursive: true, force: true })
     await rm(concurrencyUploadRoot, { recursive: true, force: true })
@@ -5770,7 +5799,7 @@ async function smokeCodexBridgeRouteHandlers(): Promise<void> {
     dependencies as never,
   )
 
-  assert.equal(replayHandlers.length, 19)
+  assert.equal(replayHandlers.length, 20)
   assert.equal(await runCodexBridgeRouteHandlers(replayHandlers), true)
   assert.deepEqual(replayCalls, [{ afterSeq: 5, limit: 2 }])
   assert.deepEqual(JSON.parse(replayResponse.body), {
@@ -6827,8 +6856,8 @@ async function smokeThreadTokenUsage(): Promise<void> {
   assert.equal(store.count, 1)
   assert.equal(store.get('thread-a')?.last.outputTokens, 60)
   store.observeUpdate({ threadId: 'thread-a', tokenUsage: { invalid: true } })
-  assert.equal(store.get('thread-a'), null)
-  assert.equal(store.count, 0)
+  assert.equal(store.get('thread-a')?.last.outputTokens, 60)
+  assert.equal(store.count, 1)
 
   assert.equal(await resolveThreadTokenUsage(' ', {
     getCachedTokenUsage: () => {
